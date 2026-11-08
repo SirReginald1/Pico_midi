@@ -7,7 +7,7 @@
 
 
 #define CONTROLER_NAME "Pico Controller"
-#define NB_BUTTONS 16
+#define NB_BUTTONS 32
 #define NB_TOTAL_ADS 2
 #define NB_VAR_RESISTOR_ADS1 3
 #define NB_VAR_RESISTOR_ADS2 3
@@ -30,6 +30,11 @@
 #define ADS_GAIN GAIN_TWO//GAIN_ONE
 #define MAX_ADS_RANGE 32767
 #define DEBUG
+// Indicates if button toggling should be done on hardware
+// If defined will only send message on button press
+// If not defined will send 0x7f on press and 0x00 on release
+// NOT recomended 
+//#define HARDWARE_TOGGLE
 
 
 // Define constand arrays
@@ -39,7 +44,18 @@ const byte PCF_ADDRESSES[NB_PCF8574] = {
 
 // MIDI settings
 //const byte MIDI_CC = 16;
-const byte MIDI_CHANNEL = 1;
+const byte MIDI_BTN_CHANNELS[NB_BUTTONS] = {
+  5, 5, 5, 5, 6, 6, 6, 6, // Loop in, loop out loop jump -, +
+  5, 5, 5, 5, 5, 5, 5, 5, // Loop cue deck 1
+  6, 6, 6, 6, 6, 6, 6, 6, // Loop cue deck 2
+  //7, 7, 7, 7, 7, 7, 7, 7, // Loop cue deck 3
+  //8, 8, 8, 8, 8, 8, 8, 8, // Loop cue deck 4
+  9, 9, 9, 10, 10, 10, 0, 0 // FX toggle / 
+};
+
+const byte MIDI_VAR_RES_CHANNELS[NB_TOTAL_VAR_RESISTORS] = {
+  9, 9, 9, 10, 10, 10
+};
 
 // ADS1115 configuration
 const byte ADS_ADDRESSES[NB_TOTAL_ADS] = {
@@ -57,22 +73,30 @@ const byte ADS2_INPUT[NB_VAR_RESISTOR_ADS2] = {
 
 // Defines the controle number for each of the variable resistors for ADS1
 const byte VAR_RESISTOR_CONTROLE_NUMBERS1[NB_VAR_RESISTOR_ADS1] = {
-  17, 18, 19
+  0, 1, 2
 };
 
 const byte VAR_RESISTOR_CONTROLE_NUMBERS2[NB_VAR_RESISTOR_ADS2] = {
-  20, 21, 22
+  0, 1, 2
 };
 
 // The MIDI value associated with each button.
 // Only to be used if button is not togglable.
-const byte BUTTON_MIDI_VALUES[NB_BUTTONS] = {
-  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
-};
+#ifdef HARDWARE_TOGGLE
+  const byte BUTTON_MIDI_VALUES[NB_BUTTONS] = {
+    1, 2, 3, 4, 5, 6, 7, 8,
+    9, 10, 11, 12, 13, 14, 15, 16
+  };
+#endif
 
 // The MIDI controle number associated with each button
 const byte BUTTON_CONTROLE_NUMBERS[NB_BUTTONS] = {
-  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
+  21, 22, 73, 74, 21, 22, 73, 74, // Loop in, loop out loop jump -, +
+  1, 2, 3, 4, 5, 6, 7, 8, // Loop cue deck 1
+  1, 2, 3, 4, 5, 6, 7, 8, // Loop cue deck 2
+  //2, 3, 4, 5, 6, 7, 8, 9, // Loop cue deck 3
+  //2, 3, 4, 5, 6, 7, 8, 9, // Loop cue deck 4
+  0, 1, 2, 0, 1, 2, 0, 0 // Toggle FX
 };
 
 // ADC polling interval
@@ -84,10 +108,10 @@ unsigned long lastReadTime = 0;
 int lastCCValues[NB_TOTAL_VAR_RESISTORS] = {-1};
 
 // Array indicating if a button has been toggled
-boolean buttonToggleValue[NB_BUTTONS] = {false};
+bool buttonToggleValue[NB_BUTTONS] = {false};
 
 // Array indicating if the button at the associated index is toggolable
-boolean buttonUsesToggle[NB_BUTTONS] = {false};
+bool buttonUsesToggle[NB_BUTTONS] = {false};
 
 // USB MIDI object
 Adafruit_USBD_MIDI usb_midi;
@@ -130,7 +154,11 @@ Adafruit_ADS1115 ads[NB_TOTAL_ADS];
 ///// DEFINE PCF8574 VARIABLES ////
 volatile bool pcfInterruptFlags[NB_PCF8574] = {false};
 
-byte pcfValues[NB_PCF8574] = {0x00};
+// Last recorded state of the button
+bool buttonValues[NB_BUTTONS] = {false};
+
+// This might be redundent as values are stored in PCF
+byte pcfValues[NB_PCF8574] = {0x7f};
 
 void pcf0Interrupt() {
     pcfInterruptFlags[0] = true;
@@ -151,22 +179,35 @@ void pcf3Interrupt() {
 /**
  * Returns the appropriate value to send for the provided buttoon index
  * based on the buttons state and if the button is togglable.
+ * @param btnValue The boolean value representing if the button is pressed or not.
+ * Only takes values 0x00 or 0x01;
  * @param buttonIdx The index at which all the buttons states can be found
  * in all of it's associated arrays.
  * @return byte: The value that should be sent over MIDI.
  */
-byte selectBtnValueToSend(int buttonIdx){
-  if(buttonUsesToggle[buttonIdx]){
-    if(buttonToggleValue[buttonIdx]){
-      // If botton is currently toggled on
-      return(0x00);
+byte selectBtnValueToSend(bool btnValue, int buttonIdx){
+  #ifndef HARDWARE_TOGGLE
+    if(btnValue){
+      return(0x7f);
     }
-    return(0x7f);
-  } else {
-    return(BUTTON_MIDI_VALUES[buttonIdx]);
-  }
+    return(0x00);
+  #endif
+  // TODO: Integrate btnValue or remove compleatly
+  #ifdef HARDWARE_TOGGLE
+    if(buttonUsesToggle[buttonIdx]){
+      if(buttonToggleValue[buttonIdx]){
+        // If botton is currently toggled on
+        return(0x00);
+      }
+      return(0x7f);
+    } else {
+      return(BUTTON_MIDI_VALUES[buttonIdx]);
+    }
+    #endif
 }
 
+// !!!!!! TODO: Add variable that toggles between deck chanelle numbers based !!!!!!
+// !!!!!! on serato midi output so that cue loop affect currently selected deck !!!!!!
 /**
  * Runs throught the byte provided by a PCF8574 and sends a message if a button
  * has been pressed.
@@ -178,14 +219,28 @@ byte selectBtnValueToSend(int buttonIdx){
  */
 void sendByteForMidi(int pcfNumber, byte pcfByte){
   for(int i=0;i<8;i++){
-    if(!((pcfByte >> i) & 0x01)){  // !!!!!!! This means that a message is only sent when a button is pressed (not on release) !!!!!!!!
-      int buttonIdx = (pcfNumber * 8) + i;
-      MIDI.sendControlChange(
-        BUTTON_CONTROLE_NUMBERS[buttonIdx],
-        selectBtnValueToSend(buttonIdx),
-        MIDI_CHANNEL
-      );
-    }
+    bool btnValue = !((pcfByte >> i) & 0x01); // Reversed as default PCF8574 values are 1
+    int buttonIdx = (pcfNumber * 8) + i;
+    #ifndef HARDWARE_TOGGLE
+      if(btnValue != buttonValues[buttonIdx]){
+        MIDI.sendNoteOn(
+          BUTTON_CONTROLE_NUMBERS[buttonIdx],
+          selectBtnValueToSend(btnValue, buttonIdx),
+          MIDI_BTN_CHANNELS[buttonIdx]
+        );
+        buttonValues[buttonIdx] = btnValue;
+      }
+    #endif
+    #ifdef HARDWARE_TOGGLE
+      if(btnValue){  // !!!!!!! This means that a message is only sent when a button is pressed (not on release) !!!!!!!!
+        int buttonIdx = (pcfNumber * 8) + i;
+        MIDI.sendNoteOn(
+          BUTTON_CONTROLE_NUMBERS[buttonIdx],
+          selectBtnValueToSend(btnValue, buttonIdx),
+          MIDI_BTN_CHANNELS[buttonIdx]
+        );
+      }
+    #endif
   }
 }
 
@@ -339,7 +394,7 @@ void loop() {
         MIDI.sendControlChange(
           VAR_RESISTOR_CONTROLE_NUMBERS1[i],
           newMidiValue,
-          MIDI_CHANNEL
+          MIDI_VAR_RES_CHANNELS[i]
         );
         lastCCValues[i] = newMidiValue;
         #ifdef DEBUG
@@ -361,7 +416,7 @@ void loop() {
         MIDI.sendControlChange(
           VAR_RESISTOR_CONTROLE_NUMBERS2[i - NB_VAR_RESISTOR_ADS1],
           newMidiValue,
-          MIDI_CHANNEL
+          MIDI_VAR_RES_CHANNELS[i]
         );
         lastCCValues[i] = newMidiValue;
         #ifdef DEBUG

@@ -2,116 +2,140 @@
 #include <Wire.h>
 #include <Adafruit_TinyUSB.h>
 #include <MIDI.h>
-#include <Adafruit_ADS1X15.h>
 #include <Adafruit_NeoPixel.h>
 
 
 #define CONTROLER_NAME "Pico Controller"
+/////////////// NB CONTROLE ELEMENTS ///////////////
 #define NB_BUTTONS 32
-#define NB_TOTAL_ADS 2
-#define NB_VAR_RESISTOR_ADS1 3
-#define NB_VAR_RESISTOR_ADS2 3
-#define NB_TOTAL_VAR_RESISTORS NB_VAR_RESISTOR_ADS1 + NB_VAR_RESISTOR_ADS2
+// NOTE: If adding more potentiometers it may slow rotary encoder read
+#define NB_POTS 6
+#define NB_ROTARY_ENCODERS 6
 //#define NB_LEDS 16  // Comment this to remove all LED related code
+/////////////// NB PCF8574 AND MUX ///////////////
+#define NB_PCF8574_FOR_BTNS 5
+#define NB_PCF_FOR_ENCODERS 2//(NB_ROTARY_ENCODERS / 4 + NB_ROTARY_ENCODERS % 4 > 0 ? 1 : 0)
+#define MUX_SIZE 16
+#define NB_MUX (int)((NB_POTS / MUX_SIZE) + 1)
+/////////////// PIN DEFINITIONS ///////////////
 #define LED_PIN 16
-#define NB_PCF8574 4
 #define PCF8574_INT_PIN0 0
 #define PCF8574_INT_PIN1 1
 #define PCF8574_INT_PIN2 2
 #define PCF8574_INT_PIN3 3
-#define PCF8574_ADDRESS0 0x20
-#define PCF8574_ADDRESS1 0x21
-#define PCF8574_ADDRESS2 0x22
-#define PCF8574_ADDRESS3 0x23
+#define PCF8574_INT_PIN4 6
+#define PCF8574_ENCODER_INT_PIN0 7
+#define PCF8574_ENCODER_INT_PIN1 8
+#define MUX_S0_PIN 18
+#define MUX_S1_PIN 19
+#define MUX_S2_PIN 20
+#define MUX_S3_PIN 21
+/////////////// I2C ADDRESS DEFINITIONS ///////////////
+#define PCF8574_ADDR0 0x20
+#define PCF8574_ADDR1 0x21
+#define PCF8574_ADDR2 0x22
+#define PCF8574_ADDR3 0x23
+#define PCF8574_ADDR4 0x24 // TODO: Add this to main btn address array
+#define PCF8574_ENCODER_ADDR0 0x25
+#define PCF8574_ENCODER_ADDR1 0x26
 // TODO: Check to see if all values from the ADS can be read in a single I2C request.
-#define ADS1115_ADDRESS0 0x48
-#define ADS1115_ADDRESS1 0x49
+#define ADS1115_ADDR 0x48
+/////////////// OTHER PARAMETERS ///////////////
 #define ADC_POLL_RATE 10 // In ms
-#define ADS_GAIN GAIN_TWO//GAIN_ONE
-#define MAX_ADS_RANGE 32767
-#define DEBUG
-// Indicates if button toggling should be done on hardware
-// If defined will only send message on button press
-// If not defined will send 0x7f on press and 0x00 on release
-// NOT recomended 
-//#define HARDWARE_TOGGLE
-
+#define ENCODER_POLL_RATE 10 // In ms
+#define ENCODER_MSG_INTERVAL 30 // In ms
+#define MAX_ADS_RANGE 26335//32767
+#define ADS_CHANGE_MARGIN 10 // Used to filter noise
+/////////////// MESSAGE CODE DEFINITIONS ///////////////
+#define MSG_BTN_CODE 1
+#define MSG_POT_CODE 2
+#define MSG_ENCODER_CODE 3
+/////////////// ADS1115 CONFIGURATIONS ///////////////
+// And gain with MSB
+#define ADS_READ_ADDR_POINTER 0x00
+#define ADS_CONFIG_ADDR 0x01
+#define ADS_GAIN1 0x00
+#define ADS_GAIN2 0x02
+#define ADS_GAIN3 0x04
+#define ADS_CHAN0 0x40
+#define ADS_CHAN1 0x50
+#define ADS_CHAN2 0x60
+#define ADS_CHAN3 0x70
+#define ADS_BASE_CONFIG_MSB ADS_GAIN2//0x42
+#define ADS_BASE_CONFIG_LSB 0x83
+/////////////// UART CODES ///////////////
+#define UART_CODE_BTN 0x62            // (b)
+#define UART_CODE_ENCODER 0x65        // (e)
+#define UART_CODE_POT 0x70            // (p)
+#define UART_CODE_ENCODER_PLUS 0x2b   // (+)
+#define UART_CODE_ENCODER_MINUS 0x2d  // (-)
 
 // Define constand arrays
-const byte PCF_ADDRESSES[NB_PCF8574] = {
-  PCF8574_ADDRESS0, PCF8574_ADDRESS1, PCF8574_ADDRESS2, PCF8574_ADDRESS3
+const byte PCF_BTN_ADDRESSES[NB_PCF8574_FOR_BTNS] = {
+  PCF8574_ADDR0, PCF8574_ADDR1, PCF8574_ADDR2, PCF8574_ADDR3, PCF8574_ADDR4
+};
+
+const byte PCF_ENCODER_ADDR[NB_PCF_FOR_ENCODERS] = {
+  PCF8574_ENCODER_ADDR0, PCF8574_ENCODER_ADDR1
 };
 
 // MIDI settings
+const byte MIDI_ENCODER_CHANNEL[NB_ROTARY_ENCODERS] = {
+  1, 1, 1, 1, 1, 1
+};
+
+const byte MIDI_ENCODER_VELOCITY[NB_ROTARY_ENCODERS] = {
+  0, 1, 2, 3, 4, 5
+};
+
 //const byte MIDI_CC = 16;
-const byte MIDI_BTN_CHANNELS[NB_BUTTONS] = {
+const byte MIDI_BTN_CHANNELS[NB_BUTTONS + NB_ROTARY_ENCODERS] = {
   5, 5, 5, 5, 6, 6, 6, 6, // Loop in, loop out loop jump -, +
   5, 5, 5, 5, 5, 5, 5, 5, // Loop cue deck 1
   6, 6, 6, 6, 6, 6, 6, 6, // Loop cue deck 2
   //7, 7, 7, 7, 7, 7, 7, 7, // Loop cue deck 3
   //8, 8, 8, 8, 8, 8, 8, 8, // Loop cue deck 4
-  9, 9, 9, 10, 10, 10, 0, 0 // FX toggle / 
+  9, 9, 9, 10, 10, 10, 0, 0, // FX toggle /
+  0, 0, 0, 0, 0, 0 // Rotary encoder buttons
 };
 
-const byte MIDI_VAR_RES_CHANNELS[NB_TOTAL_VAR_RESISTORS] = {
+// The channels used for the potentiometers
+const byte MIDI_POT_CHANNELS[NB_POTS] = {
   9, 9, 9, 10, 10, 10
 };
 
 // ADS1115 configuration
-const byte ADS_ADDRESSES[NB_TOTAL_ADS] = {
-  ADS1115_ADDRESS0, ADS1115_ADDRESS1
+// Defines the controle number for each of the potentiometers for ADS1
+const byte MIDI_POT_CONTROLE_NUMBERS[NB_POTS] = {
+  0, 1, 2, 0, 1, 2
 };
-
-// Define used pins on ads 1
-const byte ADS1_INPUT[NB_VAR_RESISTOR_ADS1] = {
-  0, 1, 2
-};
-
-const byte ADS2_INPUT[NB_VAR_RESISTOR_ADS2] = {
-  0, 1, 2
-};
-
-// Defines the controle number for each of the variable resistors for ADS1
-const byte VAR_RESISTOR_CONTROLE_NUMBERS1[NB_VAR_RESISTOR_ADS1] = {
-  0, 1, 2
-};
-
-const byte VAR_RESISTOR_CONTROLE_NUMBERS2[NB_VAR_RESISTOR_ADS2] = {
-  0, 1, 2
-};
-
-// The MIDI value associated with each button.
-// Only to be used if button is not togglable.
-#ifdef HARDWARE_TOGGLE
-  const byte BUTTON_MIDI_VALUES[NB_BUTTONS] = {
-    1, 2, 3, 4, 5, 6, 7, 8,
-    9, 10, 11, 12, 13, 14, 15, 16
-  };
-#endif
 
 // The MIDI controle number associated with each button
-const byte BUTTON_CONTROLE_NUMBERS[NB_BUTTONS] = {
+const byte MIDI_BUTTON_CONTROLE_NUMBERS[NB_BUTTONS + NB_ROTARY_ENCODERS] = {
   21, 22, 73, 74, 21, 22, 73, 74, // Loop in, loop out loop jump -, +
   1, 2, 3, 4, 5, 6, 7, 8, // Loop cue deck 1
   1, 2, 3, 4, 5, 6, 7, 8, // Loop cue deck 2
   //2, 3, 4, 5, 6, 7, 8, 9, // Loop cue deck 3
   //2, 3, 4, 5, 6, 7, 8, 9, // Loop cue deck 4
-  0, 1, 2, 0, 1, 2, 0, 0 // Toggle FX
+  0, 1, 2, 0, 1, 2, // Toggle FX
+  0, 1, 2, 3, 4, 5 // Rotary encoder buttons
 };
 
 // ADC polling interval
 const unsigned long readInterval = ADC_POLL_RATE;
-unsigned long lastReadTime = 0;
+unsigned long lastPotReadTime = 0;
+
+// Rotary encoder debounce periode
+const unsigned long encoderReadInterval = ENCODER_POLL_RATE;
+unsigned long lastEncoderReadTime[NB_ROTARY_ENCODERS] = {0};
+
+// The interval of time between rotary encoder message sending
+const unsigned long encoderMsgInterval = ENCODER_MSG_INTERVAL;
+unsigned long encoderLastMsgTime = 0;
 
 // MIDI definitions
-// Last transmitted MIDI value
-int lastCCValues[NB_TOTAL_VAR_RESISTORS] = {-1};
-
-// Array indicating if a button has been toggled
-bool buttonToggleValue[NB_BUTTONS] = {false};
-
-// Array indicating if the button at the associated index is toggolable
-bool buttonUsesToggle[NB_BUTTONS] = {false};
+// Last recorded potentiometer value
+uint16_t lastPotVal[NB_POTS] = {0};
 
 // USB MIDI object
 Adafruit_USBD_MIDI usb_midi;
@@ -148,130 +172,62 @@ void handleControlChange(byte channel, byte number, byte value) {
   );
 #endif
 
-///// DEFINE ADS1115 VARIABLES ////
-Adafruit_ADS1115 ads[NB_TOTAL_ADS];
-
 ///// DEFINE PCF8574 VARIABLES ////
-volatile bool pcfInterruptFlags[NB_PCF8574] = {false};
+volatile bool pcfInterruptFlags[NB_PCF8574_FOR_BTNS] = {false};
+
+volatile bool pcfEncoderInterruptFlags[NB_PCF_FOR_ENCODERS] = {false};
 
 // Last recorded state of the button
 bool buttonValues[NB_BUTTONS] = {false};
 
-// This might be redundent as values are stored in PCF
-byte pcfValues[NB_PCF8574] = {0x7f};
+// Last recorded state for each rotary encoder
+int lastEncoderValues[NB_ROTARY_ENCODERS] = {0x7f};
 
-void pcf0Interrupt() {
+void pcf0Interrupt(){
     pcfInterruptFlags[0] = true;
 }
 
-void pcf1Interrupt() {
+void pcf1Interrupt(){
     pcfInterruptFlags[1] = true;
 }
 
-void pcf2Interrupt() {
+void pcf2Interrupt(){
     pcfInterruptFlags[2] = true;
 }
 
-void pcf3Interrupt() {
+void pcf3Interrupt(){
     pcfInterruptFlags[3] = true;
 }
 
-/**
- * Returns the appropriate value to send for the provided buttoon index
- * based on the buttons state and if the button is togglable.
- * @param btnValue The boolean value representing if the button is pressed or not.
- * Only takes values 0x00 or 0x01;
- * @param buttonIdx The index at which all the buttons states can be found
- * in all of it's associated arrays.
- * @return byte: The value that should be sent over MIDI.
- */
-byte selectBtnValueToSend(bool btnValue, int buttonIdx){
-  #ifndef HARDWARE_TOGGLE
-    if(btnValue){
-      return(0x7f);
-    }
-    return(0x00);
-  #endif
-  // TODO: Integrate btnValue or remove compleatly
-  #ifdef HARDWARE_TOGGLE
-    if(buttonUsesToggle[buttonIdx]){
-      if(buttonToggleValue[buttonIdx]){
-        // If botton is currently toggled on
-        return(0x00);
-      }
-      return(0x7f);
-    } else {
-      return(BUTTON_MIDI_VALUES[buttonIdx]);
-    }
-    #endif
+// NOTE: This pcf has the buttons for the rotary encoders
+void pcf4Interrupt(){
+  pcfInterruptFlags[4] = true;
 }
 
-// !!!!!! TODO: Add variable that toggles between deck chanelle numbers based !!!!!!
-// !!!!!! on serato midi output so that cue loop affect currently selected deck !!!!!!
-/**
- * Runs throught the byte provided by a PCF8574 and sends a message if a button
- * has been pressed.
- * !!!!! Messages are only sent on button press not on resease !!!!!
- * @param pcfNumber The index of the pcf that provided the byte. Help map
- * each binary value to a specific button.
- * @param pcfByte The byte containing the state values for each of it's
- * attached buttons.
- */
-void sendByteForMidi(int pcfNumber, byte pcfByte){
-  for(int i=0;i<8;i++){
-    bool btnValue = !((pcfByte >> i) & 0x01); // Reversed as default PCF8574 values are 1
-    int buttonIdx = (pcfNumber * 8) + i;
-    #ifndef HARDWARE_TOGGLE
-      if(btnValue != buttonValues[buttonIdx]){
-        MIDI.sendNoteOn(
-          BUTTON_CONTROLE_NUMBERS[buttonIdx],
-          selectBtnValueToSend(btnValue, buttonIdx),
-          MIDI_BTN_CHANNELS[buttonIdx]
-        );
-        buttonValues[buttonIdx] = btnValue;
-      }
-    #endif
-    #ifdef HARDWARE_TOGGLE
-      if(btnValue){  // !!!!!!! This means that a message is only sent when a button is pressed (not on release) !!!!!!!!
-        int buttonIdx = (pcfNumber * 8) + i;
-        MIDI.sendNoteOn(
-          BUTTON_CONTROLE_NUMBERS[buttonIdx],
-          selectBtnValueToSend(btnValue, buttonIdx),
-          MIDI_BTN_CHANNELS[buttonIdx]
-        );
-      }
-    #endif
-  }
+// Rotary encoder PCF interupts
+void encoderPcf0Interrupt(){
+  pcfEncoderInterruptFlags[0] = true;
+}
+
+void encoderPcf1Interrupt(){
+  pcfEncoderInterruptFlags[1] = true;
 }
 
 /**
- * Reads the byte from the indecated PCF8574, and sends the MIDI message
- * associated with that button if needed.
- * @param pcfNb Index indicating which PCF8574 to read the values from
- * based on the values in the associated PCF I2C address array.
+ * Selects the multiplexer channel to read from
+ * @param channel The channel to set both multiplexers to.
  */
-void readPCF8574(int pcfNb) {
-    Wire.requestFrom(PCF_ADDRESSES[pcfNb], (uint8_t)1);
-    if (Wire.available()) {
-        uint8_t newValue = Wire.read();
-        if (newValue != pcfValues[pcfNb]) { // TODO: Check if this is redundent due to only read when interupt
-          #ifdef DEBUG
-            Serial.print("PCF8574 nb ");
-            Serial.print(pcfNb);
-            Serial.print(": ");
-            Serial.println(newValue, BIN);
-          #endif
-          pcfValues[pcfNb] = newValue;
-          sendByteForMidi(pcfNb, newValue);
-        }
-    }
+void selectMUXChannel(int channel){
+  digitalWrite(MUX_S0_PIN, channel & 0x1);
+  digitalWrite(MUX_S1_PIN, (channel >> 1) & 0x1);
+  digitalWrite(MUX_S2_PIN, (channel >> 2) & 0x1);
+  digitalWrite(MUX_S3_PIN, (channel >> 3) & 0x1);
+  //uint32_t mask = (channel & 0xF) << 18;
+  //sio_hw->gpio_set = mask;
+  //sio_hw->gpio_clr = (~mask) & 0x000C0000u;  // Sets pins low
 }
 
 void setup() {
-  #ifdef DEBUG
-  Serial.begin(115200);
-  #endif
-
   ///// SETUP MIDI /////
   // Manual begin() is required on core without built-in support e.g. mbed rp2040
   if (!TinyUSBDevice.isInitialized()) {
@@ -296,33 +252,24 @@ void setup() {
   // be called whenever the Bluefruit receives MIDI Note On messages.
   //MIDI.setHandleNoteOn(handleNoteOn);
   //MIDI.setHandleNoteOff(handleNoteOff);
-
+  
   ///// INITIALIZE I2C /////
   //Wire.setSDA(4);
   //Wire.setSCL(5);
   Wire.begin();
-
-  ///// INITIALIZE PCF8574 MODULES /////
-  #ifdef DEBUG
-    for (int i = 0; i < NB_PCF8574; i++) {
-
-      // Release all PCF8574 pins (configure as inputs)
-      Wire.beginTransmission(PCF_ADDRESSES[i]);
-      Wire.write(0xFF);
-
-      if (Wire.endTransmission() != 0) {
-          Serial.println("PCF8574 not found!");
-      } else {
-          Serial.println("PCF8574 initialized!");
-      }
-    }
-  #endif
 
   // Configure interrupt pin
   pinMode(PCF8574_INT_PIN0, INPUT_PULLUP);
   pinMode(PCF8574_INT_PIN1, INPUT_PULLUP);
   pinMode(PCF8574_INT_PIN2, INPUT_PULLUP);
   pinMode(PCF8574_INT_PIN3, INPUT_PULLUP);
+  pinMode(PCF8574_INT_PIN4, INPUT_PULLUP);
+  pinMode(PCF8574_ENCODER_INT_PIN0, INPUT_PULLUP);
+  pinMode(PCF8574_ENCODER_INT_PIN1, INPUT_PULLUP);
+  pinMode(MUX_S0_PIN, OUTPUT);
+  pinMode(MUX_S1_PIN, OUTPUT);
+  pinMode(MUX_S2_PIN, OUTPUT);
+  pinMode(MUX_S3_PIN, OUTPUT);
 
   attachInterrupt(
       digitalPinToInterrupt(PCF8574_INT_PIN0),
@@ -348,13 +295,30 @@ void setup() {
       FALLING                                 
   );
 
+  attachInterrupt(                            
+      digitalPinToInterrupt(PCF8574_INT_PIN4),
+      pcf4Interrupt,                           
+      FALLING                                 
+  );
+
+  attachInterrupt(                            
+    digitalPinToInterrupt(PCF8574_ENCODER_INT_PIN0),
+    encoderPcf0Interrupt,                           
+    FALLING                                 
+  );
+
+  attachInterrupt(                            
+      digitalPinToInterrupt(PCF8574_ENCODER_INT_PIN1),
+      encoderPcf1Interrupt,                           
+      FALLING                                 
+  );
+
   ///// INITIALIZE ADS1115 MODULES /////
-  for(int i=0;i<NB_TOTAL_ADS;i++){
-    if(ads[i].begin(ADS_ADDRESSES[i], &Wire)){
-      // Set ADC gain: +/- 4.096V
-      ads[i].setGain(ADS_GAIN);
-    }
-  }
+  Wire.beginTransmission(ADS1115_ADDR);
+  Wire.write(ADS_CONFIG_ADDR);          // Write to config register
+  Wire.write(ADS_BASE_CONFIG_MSB | ADS_CHAN0); // MSB
+  Wire.write(ADS_BASE_CONFIG_LSB);             // LSB
+  Wire.endTransmission();
 
   ///// INITIALIZE LED STRIPS /////
   // TODO: Set startup annimation here
@@ -381,72 +345,152 @@ void loop() {
   }
 
   // Read ADS1115 periodically
-  if (millis() - lastReadTime >= readInterval) {
-    lastReadTime = millis();
-
-    for(int i=0;i<NB_VAR_RESISTOR_ADS1;i++){
-      // Read analog input A0
-      int16_t adcValue = ads[0].readADC_SingleEnded(ADS1_INPUT[i]);
-      // Convert ADC reading (0-32767) to MIDI (0-127) and keep value within MIDI range
-      int newMidiValue = constrain(map(adcValue, 0, MAX_ADS_RANGE, 0, 127), 0, 127);;
+  if (millis() - lastPotReadTime >= readInterval) {
+    lastPotReadTime = millis();
+    for(int i=0;i<NB_POTS;i++){
+      selectMUXChannel(i);
+      // Point to Conversion register
+      Wire.beginTransmission(ADS1115_ADDR);
+      Wire.write(ADS_READ_ADDR_POINTER);         // pointer → Conversion
+      Wire.endTransmission();
+      // Read 2 bytes (MSB, LSB)
+      Wire.requestFrom(ADS1115_ADDR, (uint8_t)2);
+      int16_t msb = Wire.read();
+      int16_t lsb = Wire.read();
+      int16_t adcValue = (int16_t)((msb << 8) | lsb);
       // Send MIDI only when value changes
-      if (newMidiValue != lastCCValues[i]) {
-        MIDI.sendControlChange(
-          VAR_RESISTOR_CONTROLE_NUMBERS1[i],
-          newMidiValue,
-          MIDI_VAR_RES_CHANNELS[i]
-        );
-        lastCCValues[i] = newMidiValue;
-        #ifdef DEBUG
-          Serial.print("Knob: ");
-          Serial.print(i);
-          Serial.print(", val: ");
-          Serial.println(newMidiValue);
-        #endif
-      }
-    }
-
-    for(int i=NB_VAR_RESISTOR_ADS1;i<NB_TOTAL_VAR_RESISTORS;i++){
-      // Read analog input A0
-      int16_t adcValue = ads[1].readADC_SingleEnded(ADS2_INPUT[i - NB_VAR_RESISTOR_ADS1]);
-      // Convert ADC reading (0-32767) to MIDI (0-127) and keep value within MIDI range
-      int newMidiValue = constrain(map(adcValue, 0, MAX_ADS_RANGE, 0, 127), 0, 127);
-      // Send MIDI only when value changes
-      if (newMidiValue != lastCCValues[i]) {
-        MIDI.sendControlChange(
-          VAR_RESISTOR_CONTROLE_NUMBERS2[i - NB_VAR_RESISTOR_ADS1],
-          newMidiValue,
-          MIDI_VAR_RES_CHANNELS[i]
-        );
-        lastCCValues[i] = newMidiValue;
-        #ifdef DEBUG
-          Serial.print("Knob: ");
-          Serial.print(i);
-          Serial.print(", val: ");
-          Serial.println(newMidiValue);
-        #endif
+      if(abs(adcValue - lastPotVal[i]) > ADS_CHANGE_MARGIN){
+        rp2040.fifo.push(MSG_POT_CODE);
+        rp2040.fifo.push(i);
+        rp2040.fifo.push(adcValue);
+        lastPotVal[i] = adcValue;
       }
     }
   }
   
   // Process PCF8574 interrupt
-  for(int i=0;i<NB_PCF8574;i++){
-    if (pcfInterruptFlags[i]) {
+  for(int pcfId=0;pcfId<NB_PCF8574_FOR_BTNS;pcfId++){
+    if(pcfInterruptFlags[pcfId]){
       noInterrupts();
-      pcfInterruptFlags[i] = false;
+      pcfInterruptFlags[pcfId] = false;
       interrupts();
-      readPCF8574(i);
+      Wire.requestFrom(PCF_BTN_ADDRESSES[pcfId], (uint8_t)1);
+      if (Wire.available()){
+          rp2040.fifo.push(MSG_BTN_CODE);
+          rp2040.fifo.push(pcfId);
+          rp2040.fifo.push(Wire.read());
+      }
     }
   }
   
+  // Process PCF8574 rotary encoder interupts
+  for(int pcfId=0;pcfId<NB_PCF_FOR_ENCODERS;pcfId++){
+    if(millis() - lastEncoderReadTime[pcfId] >= encoderReadInterval && pcfEncoderInterruptFlags[pcfId]){
+      lastEncoderReadTime[pcfId] = millis();
+      noInterrupts();
+      pcfEncoderInterruptFlags[pcfId] = false;
+      interrupts();
+      Wire.requestFrom(PCF_ENCODER_ADDR[pcfId], (uint8_t)1);
+      if (Wire.available()){
+        int pcfValue = Wire.read();
+        // Loop through all paires of encoder values
+        int byteShiftAmount = 0;
+        for(int encoderPcfId=0;encoderPcfId<4;encoderPcfId++){
+          int encoderId = (pcfId * 4) + encoderPcfId;
+          uint8_t encoderVal = (pcfValue >> byteShiftAmount) & 0x03;
+          if(encoderVal != lastEncoderValues[encoderId] && millis() - encoderLastMsgTime >= encoderMsgInterval){
+            encoderLastMsgTime = millis();
+            switch((lastEncoderValues[encoderId] << 2) | encoderVal){
+              // Rotation to the right
+              case 0b1101:
+              case 0b0100:
+              case 0b0010:
+              //case 0b1011:
+                rp2040.fifo.push(MSG_ENCODER_CODE);
+                rp2040.fifo.push(encoderId);
+                rp2040.fifo.push(UART_CODE_ENCODER_PLUS);
+                //rp2040.fifo.push(1);
+                break;
+              // Rotation to the left
+              case 0b1110:
+              case 0b1000:
+              case 0b0001:
+              //case 0b0111:
+                rp2040.fifo.push(MSG_ENCODER_CODE);
+                rp2040.fifo.push(encoderId);
+                rp2040.fifo.push(UART_CODE_ENCODER_MINUS);
+                //rp2040.fifo.push(0);
+                break;
+            }
+          }
+          lastEncoderValues[encoderId] = encoderVal;
+          byteShiftAmount += 2;
+        }
+      }
+    }
+  }
+}
+
+/////////////////////////////////// Core 1 ///////////////////////////
+
+void setup1() {
+  // NOTE: Using both serial and midi means debug output does not work
+  // as pico only hase UART0 and UART1
+  Serial.begin(115200);
+}
+
+void loop1() {
+  if (rp2040.fifo.available()) {
+    uint32_t msgType = rp2040.fifo.pop();
+    /*uint32_t*/uint8_t pcfId = rp2040.fifo.pop();
+    /*uint32_t*/uint8_t message = rp2040.fifo.pop();
+    switch(msgType){
+      case 1:  // Send button related messages
+        for(int i=0;i<8;i++){
+          bool btnValue = !((message >> i) & 0x01); // Reversed as default PCF8574 values are 1
+          int buttonIdx = (pcfId * 8) + i;
+          if(btnValue != buttonValues[buttonIdx]){
+            byte message;
+            if(btnValue){
+              message = 0x7f;
+            } else {
+              message = 0x00;
+            }
+            MIDI.sendNoteOn(
+              message,
+              MIDI_BUTTON_CONTROLE_NUMBERS[buttonIdx],
+              MIDI_BTN_CHANNELS[buttonIdx]
+            );
+            //uint8_t data[3] = {UART_CODE_BTN, (uint8_t)buttonIdx, message};
+            Serial.write(new uint8_t[3]{UART_CODE_BTN, buttonIdx, message}, 3);
+            Serial.flush();
+            buttonValues[buttonIdx] = btnValue;
+          }
+        }
+        break;
+      case 2:
+        // Here pcfId just represents the pot number.
+        MIDI.sendControlChange(
+          MIDI_POT_CONTROLE_NUMBERS[pcfId],
+          constrain(map(message, 0, MAX_ADS_RANGE, 0, 127), 0, 127),
+          MIDI_POT_CHANNELS[pcfId]
+        );
+        //uint8_t data[3] = {UART_CODE_POT, (uint8_t)pcfId, message};
+        Serial.write(new uint8_t[3]{UART_CODE_POT, pcfId, message}, 3);
+        Serial.flush();
+        break;
+      case 3:
+        MIDI.sendNoteOn(
+          message,
+          MIDI_ENCODER_VELOCITY[pcfId],
+          MIDI_ENCODER_CHANNEL[pcfId]
+        );
+        //uint8_t data[3] = {UART_CODE_ENCODER, (uint8_t)pcfId, message};
+        Serial.write(new uint8_t[3]{UART_CODE_ENCODER, pcfId, message}, 3);
+        Serial.flush();
+        break;
+    }
+  }
   // read any new MIDI messages
   MIDI.read();
-
-  // Send Note On for current position at full velocity (127) on channel 1.
-  //MIDI.sendNoteOn(45, 127, 1);
-  // Send Note Off for previous note.
-  //MIDI.sendNoteOff(note_sequence[previous], 0, 1);
-  // Send Control Change:
-  // CC number 16, value 85, MIDI channel 1
-  //MIDI.sendControlChange(16, 85, 1);
 }
